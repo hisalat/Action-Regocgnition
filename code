@@ -1,0 +1,93 @@
+import torch
+import torchvision
+from torchvision import transforms
+import os
+import cv2
+import numpy as np
+import json
+from PIL import Image
+
+# Setup and file verification
+from google.colab import drive
+drive.mount('/content/drive/')
+video_path = "/content/drive/My Drive/video_example_peter"
+print("Exists?" , os.path.exists(video_path))
+
+# Loading a pretrained action recognition model using PyTorch’s torchvision library
+
+weights = torchvision.models.video.R3D_18_Weights.DEFAULT
+model = torchvision.models.video.r3d_18(weights=weights)
+model.eval()
+
+## Applying transformations to prepare each video frame for input into the R3D-18 model
+
+transform = transforms.Compose([
+    transforms.Resize((112, 112)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.43216, 0.394666, 0.37645],  # official Kinetics-400 means
+        std=[0.22803, 0.22145, 0.216989]    # official Kinetics-400 stds
+    )
+])
+
+
+# Loading Kinetics-400 class labels from torchvision weights metadata
+kinetics_classes = weights.meta["categories"]
+
+# Opening the video
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    raise RuntimeError("Failed to open video.")
+
+#Retrieving the video metadata
+fps = cap.get(cv2.CAP_PROP_FPS)
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+duration = total_frames / fps
+print(f"Video info: {total_frames} frames, {fps:.2f} FPS, duration {duration:.2f}s")
+
+# Defining the number of frames per clip and strides
+clip_length = 16  
+clip_stride = 8  
+
+frames = []
+actions_timeline = []
+
+print("Extracting frames...")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frames.append(frame_rgb)
+cap.release()
+print(f"Extracted {len(frames)} frames.")
+
+print(f"Processing clips of {clip_length} frames with stride {clip_stride}...")
+
+# Looping through the video with a sliding window to classify each 16-frame clip and record the top predicted actions
+
+for start in range(0, len(frames) - clip_length + 1, clip_stride):
+    clip_frames = frames[start:start+clip_length]
+    clip_tensors = [transform(Image.fromarray(frame)) for frame in clip_frames]
+    clip_tensor = torch.stack(clip_tensors)
+    clip_tensor = clip_tensor.permute(1, 0, 2, 3).unsqueeze(0)  
+
+    with torch.no_grad():
+        outputs = model(clip_tensor)
+        probs = torch.nn.functional.softmax(outputs, dim=1)
+        top_prob, top_catid = torch.topk(probs, 5)
+
+    timestamp = start / fps
+    top_actions = [(kinetics_classes[idx], prob.item()) for idx, prob in zip(top_catid[0], top_prob[0])]
+
+    actions_timeline.append({
+        "timestamp_sec": timestamp,
+        "top_actions": top_actions
+    })
+
+# Printing the summary timeline with top-1 predicted action per clip
+print("\n=== Action Timeline (Top-1 per clip) ===")
+for event in actions_timeline:
+    ts = event["timestamp_sec"]
+    action, prob = event["top_actions"][0]
+    print(f"{ts:.1f}s: {action} ({prob*100:.1f}%)")
